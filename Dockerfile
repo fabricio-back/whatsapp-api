@@ -1,58 +1,53 @@
-### BASE IMAGE
-FROM node:20-bullseye-slim AS base
+# --- Estágio 1: Build ---
+# Usamos a imagem oficial do Node 20 com base Debian (para ter o apt-get)
+FROM node:20-bullseye-slim AS builder
+WORKDIR /app
 
-### BUILD IMAGE
-FROM base AS builder
+# Instala dependências do sistema operacional necessárias (ex: para gerar vídeos/gifs)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /codechat
-
-# Instalar dependências de construção primeiro
-RUN apt-get update && apt-get install -y git ffmpeg && rm -rf /var/lib/apt/lists/*
-
-# Copiar arquivos package.json e instalar dependências
+# Copia os arquivos de pacote e instala as dependências de produção
 COPY package*.json ./
-RUN npm install --force
+RUN npm install --omit=dev --force
 
-# Copiar os demais arquivos necessários para o build
-COPY tsconfig.json .
-COPY ./src ./src
-COPY ./public ./public
-COPY ./docs ./docs
-COPY ./prisma ./prisma
-COPY ./views ./views
-COPY .env.dev .env
+# Copia o restante do código-fonte
+COPY . .
 
-# Definir variável de ambiente para a construção
-ENV DATABASE_URL=postgres://postgres:pass@localhost/db_test
+# Gera o cliente Prisma (isso NÃO precisa de conexão com o banco)
 RUN npx prisma generate
 
-RUN npm run build
+# Compila o TypeScript para JavaScript
+# Usamos o script específico de compilação, ignorando o "db:push"
+RUN npm run build:tsc
 
-### PRODUCTION IMAGE
-FROM base AS production
 
-WORKDIR /codechat
+# --- Estágio 2: Produção ---
+# Começa de uma imagem limpa e enxuta
+FROM node:20-bullseye-slim AS production
+WORKDIR /app
 
-LABEL com.api.version="1.3.3"
-LABEL com.api.mantainer="https://github.com/code-chat-br"
-LABEL com.api.repository="https://github.com/code-chat-br/whatsapp-api"
-LABEL com.api.issues="https://github.com/code-chat-br/whatsapp-api/issues"
+# Cria um usuário não-root por segurança
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 codechat
 
-# Copiar arquivos construídos do estágio builder
-COPY --from=builder /codechat/dist ./dist
-COPY --from=builder /codechat/docs ./docs
-COPY --from=builder /codechat/prisma ./prisma
-COPY --from=builder /codechat/views ./views
-COPY --from=builder /codechat/node_modules ./node_modules
-COPY --from=builder /codechat/package*.json ./
-COPY --from=builder /codechat/.env ./
-COPY --from=builder /codechat/public ./public
-COPY ./deploy_db.sh ./
+# Instala as dependências de produção do sistema operacional
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
-RUN chmod +x ./deploy_db.sh
+# Copia apenas os artefatos necessários do estágio 'builder'
+# e define o usuário 'codechat' como proprietário
+COPY --from=builder --chown=codechat:nodejs /app/dist ./dist
+COPY --from=builder --chown=codechat:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=codechat:nodejs /app/package*.json ./
+COPY --from=builder --chown=codechat:nodejs /app/prisma ./prisma
+COPY --from=builder --chown=codechat:nodejs /app/public ./public
+COPY --from=builder --chown=codechat:nodejs /app/views ./views
 
-RUN mkdir instances
+# Define o usuário não-root para rodar a aplicação
+USER codechat
 
-ENV DOCKER_ENV=true
+# Expõe a porta que a aplicação usa
+EXPOSE 8080
 
-ENTRYPOINT [ "/bin/bash", "-c", ". ./deploy_db.sh && node ./dist/src/main" ]
+# Comando padrão para iniciar o servidor.
+# A migração do banco será feita pelo Coolify no "Start Command".
+CMD ["node", "./dist/src/main.js"]
